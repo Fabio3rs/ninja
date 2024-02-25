@@ -1602,6 +1602,98 @@ NORETURN void real_main(int argc, char** argv) {
 
 }  // anonymous namespace
 
+extern "C" int libninja_main(int argc, char** argv) {
+  BuildConfig config;
+  Options options = {};
+  options.input_file = "build.ninja";
+  options.dupe_edges_should_err = true;
+
+  setvbuf(stdout, NULL, _IOLBF, BUFSIZ);
+  const char* ninja_command = argv[0];
+
+  int exit_code = ReadFlags(&argc, &argv, &options, &config);
+  if (exit_code >= 0)
+    return (exit_code);
+
+  Status* status = new StatusPrinter(config);
+
+  if (options.working_dir) {
+    // The formatting of this string, complete with funny quotes, is
+    // so Emacs can properly identify that the cwd has changed for
+    // subsequent commands.
+    // Don't print this if a tool is being used, so that tool output
+    // can be piped into a file without this string showing up.
+    if (!options.tool && config.verbosity != BuildConfig::NO_STATUS_UPDATE)
+      status->Info("Entering directory `%s'", options.working_dir);
+    if (chdir(options.working_dir) < 0) {
+      Fatal("chdir to '%s' - %s", options.working_dir, strerror(errno));
+    }
+  }
+
+  if (options.tool && options.tool->when == Tool::RUN_AFTER_FLAGS) {
+    // None of the RUN_AFTER_FLAGS actually use a NinjaMain, but it's needed
+    // by other tools.
+    NinjaMain ninja(ninja_command, config);
+    return ((ninja.*options.tool->func)(&options, argc, argv));
+  }
+
+  // Limit number of rebuilds, to prevent infinite loops.
+  const int kCycleLimit = 100;
+  for (int cycle = 1; cycle <= kCycleLimit; ++cycle) {
+    NinjaMain ninja(ninja_command, config);
+
+    ManifestParserOptions parser_opts;
+    if (options.dupe_edges_should_err) {
+      parser_opts.dupe_edge_action_ = kDupeEdgeActionError;
+    }
+    if (options.phony_cycle_should_err) {
+      parser_opts.phony_cycle_action_ = kPhonyCycleActionError;
+    }
+    ManifestParser parser(&ninja.state_, &ninja.disk_interface_, parser_opts);
+    string err;
+    if (!parser.Load(options.input_file, &err)) {
+      status->Error("%s", err.c_str());
+      return (1);
+    }
+
+    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
+      return ((ninja.*options.tool->func)(&options, argc, argv));
+
+    if (!ninja.EnsureBuildDirExists())
+      return (1);
+
+    if (!ninja.OpenBuildLog() || !ninja.OpenDepsLog())
+      return (1);
+
+    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOGS)
+      return ((ninja.*options.tool->func)(&options, argc, argv));
+
+    // Attempt to rebuild the manifest before building anything else
+    if (ninja.RebuildManifest(options.input_file, &err, status)) {
+      // In dry_run mode the regeneration will succeed without changing the
+      // manifest forever. Better to return immediately.
+      if (config.dry_run)
+        return (0);
+      // Start the build over with the new manifest.
+      continue;
+    } else if (!err.empty()) {
+      status->Error("rebuilding '%s': %s", options.input_file, err.c_str());
+      return (1);
+    }
+
+    int result = ninja.RunBuild(argc, argv, status);
+    if (g_metrics)
+      ninja.DumpMetrics();
+    return (result);
+  }
+
+  status->Error(
+      "manifest '%s' still dirty after %d tries, perhaps system time is not "
+      "set",
+      options.input_file, kCycleLimit);
+  return (1);
+}
+
 int main(int argc, char** argv) {
 #if defined(_MSC_VER)
   // Set a handler to catch crashes not caught by the __try..__except

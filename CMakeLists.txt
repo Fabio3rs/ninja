@@ -4,9 +4,14 @@ include(CheckSymbolExists)
 include(CheckIPOSupported)
 
 option(NINJA_BUILD_BINARY "Build ninja binary" ON)
+option(NINJA_BUILD_EXTERNAL "Build ninja library to external usage" ON)
 option(NINJA_FORCE_PSELECT "Use pselect() even on platforms that provide ppoll()" OFF)
 
 project(ninja CXX)
+
+if (NINJA_BUILD_EXTERNAL)
+	add_compile_options(-fPIC)
+endif()
 
 # --- optional link-time optimization
 check_ipo_supported(RESULT lto_supported OUTPUT error)
@@ -190,6 +195,12 @@ if(NINJA_BUILD_BINARY)
 	if(WIN32)
 		target_sources(ninja PRIVATE windows/ninja.manifest)
 	endif()
+endif()
+
+if (NINJA_BUILD_EXTERNAL)
+	add_library(ninjashared SHARED src/ninja.cc)
+	target_link_libraries(ninjashared PRIVATE libninja libninja-re2c)
+	target_compile_definitions(ninjashared PRIVATE NINJA_SHARED)
 endif()
 
 # Adds browse mode into the ninja binary if it's supported by the host platform.

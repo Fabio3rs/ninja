@@ -481,8 +481,17 @@ bool RealCommandRunner::CanRunMore() const {
         || GetLoadAverage() < config_.max_load_average);
 }
 
+extern "C" {
+void (*runCommandHook)(const char* command, size_t size) = nullptr;
+}
+
 bool RealCommandRunner::StartCommand(Edge* edge) {
   string command = edge->EvaluateCommand();
+
+  if (runCommandHook) {
+    runCommandHook(command.c_str(), command.size());
+  }
+
   Subprocess* subproc = subprocs_.Add(command, edge->use_console());
   if (!subproc)
     return false;
